@@ -99,7 +99,7 @@ async def send(tweet):
 
 async def loop():
     print("Bot started...")
-
+    await bot.send_message(CHAT_ID, "✅ Bot test successful")
     while True:
         try:
             tweet = await fetch_latest_tweet()
