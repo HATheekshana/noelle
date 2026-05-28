@@ -8,7 +8,7 @@ from aiogram.types import InputMediaPhoto
 # CONFIG
 # =======================
 BOT_TOKEN = "8596651439:AAG8f6HnKayox8KWVhrtUS8wm7nlVbZfqK8"
-CHAT_ID = "@genshinimpactenglishgroup"
+CHAT_ID = "-1001459190925"
 USERNAME = "noelle_helper_bot"
 
 bot = Bot(token=BOT_TOKEN)
