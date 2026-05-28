@@ -1,71 +1,75 @@
 
 import asyncio
-import snscrape.modules.twitter as sntwitter
+from playwright.async_api import async_playwright
 from aiogram import Bot
 from aiogram.types import InputMediaPhoto
 
-# =======================
-# CONFIG
-# =======================
 BOT_TOKEN = "8596651439:AAG8f6HnKayox8KWVhrtUS8wm7nlVbZfqK8"
 CHAT_ID = "-1001459190925"
 USERNAME = "noelle_helper_bot"
 
 bot = Bot(token=BOT_TOKEN)
 
-LAST_ID_FILE = "last_id.txt"
+LAST_TWEET = None
 
 
-# =======================
-# STORAGE
-# =======================
-def load_last_id():
-    try:
-        with open(LAST_ID_FILE, "r") as f:
-            return int(f.read().strip())
-    except:
-        return 0
+async def fetch_latest_tweet():
+    global LAST_TWEET
 
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
 
-def save_last_id(tweet_id):
-    with open(LAST_ID_FILE, "w") as f:
-        f.write(str(tweet_id))
+        await page.goto(f"https://twitter.com/{USERNAME}", timeout=60000)
+        await page.wait_for_timeout(5000)
 
+        tweets = await page.locator("article").all()
 
-# =======================
-# FETCH TWEETS (FIXED)
-# =======================
-def fetch_latest_tweet():
-    last_id = load_last_id()
+        if not tweets:
+            await browser.close()
+            return None
 
-    scraper = sntwitter.TwitterSearchScraper(f"from:{USERNAME}")
+        tweet = tweets[0]
 
-    for tweet in scraper.get_items():
-        if tweet.id <= last_id:
-            continue
+        text = await tweet.inner_text()
 
+        # tweet link
+        links = await tweet.locator("a").all()
+        tweet_url = None
+
+        for l in links:
+            href = await l.get_attribute("href")
+            if href and "/status/" in href:
+                tweet_url = "https://twitter.com" + href
+                break
+
+        # images
+        imgs = await tweet.locator("img").all()
         images = []
 
-        # FIX: correct media extraction
-        if hasattr(tweet, "media") and tweet.media:
-            for m in tweet.media:
-                if hasattr(m, "fullUrl"):
-                    images.append(m.fullUrl)
+        for img in imgs:
+            src = await img.get_attribute("src")
+            if src and "profile_images" not in src:
+                images.append(src)
+
+        await browser.close()
+
+        if not tweet_url:
+            return None
+
+        if tweet_url == LAST_TWEET:
+            return None
+
+        LAST_TWEET = tweet_url
 
         return {
-            "id": tweet.id,
-            "text": tweet.content,
-            "images": images,
-            "url": f"https://twitter.com/{USERNAME}/status/{tweet.id}"
+            "text": text,
+            "url": tweet_url,
+            "images": list(set(images))  # remove duplicates
         }
 
-    return None
 
-
-# =======================
-# SEND TO TELEGRAM
-# =======================
-async def send_tweet(tweet):
+async def send(tweet):
     if not tweet:
         return
 
@@ -93,20 +97,13 @@ async def send_tweet(tweet):
     await bot.send_media_group(CHAT_ID, media=media)
 
 
-# =======================
-# LOOP
-# =======================
-async def run():
+async def loop():
     print("Bot started...")
 
     while True:
         try:
-            tweet = fetch_latest_tweet()
-
-            if tweet:
-                print("New tweet:", tweet["id"])
-                await send_tweet(tweet)
-                save_last_id(tweet["id"])
+            tweet = await fetch_latest_tweet()
+            await send(tweet)
 
         except Exception as e:
             print("Error:", e)
@@ -114,12 +111,5 @@ async def run():
         await asyncio.sleep(60)
 
 
-# =======================
-# START
-# =======================
-async def main():
-    await run()
-
-
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(loop())
