@@ -1,115 +1,175 @@
-
 import asyncio
-from playwright.async_api import async_playwright
-from aiogram import Bot
-from aiogram.types import InputMediaPhoto
+from collections import defaultdict
+
+from aiogram import Bot, Dispatcher, F
+from aiogram.filters import Command
+from aiogram.types import Message
+
+# =========================
+# CONFIG
+# =========================
 
 BOT_TOKEN = "8596651439:AAG8f6HnKayox8KWVhrtUS8wm7nlVbZfqK8"
-CHAT_ID = "-1001459190925"
-USERNAME = "noelle_helper_bot"
 
-bot = Bot(token=BOT_TOKEN)
+# Group/channel ID
+TARGET_CHAT_ID = -1001459190925
 
-LAST_TWEET = None
+# Your Telegram user ID
+ADMIN_ID = 1675903713
 
+# =========================
 
-async def fetch_latest_tweet():
-    global LAST_TWEET
+bot = Bot(BOT_TOKEN)
+dp = Dispatcher()
 
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        page = await browser.new_page()
+# users waiting to broadcast
+waiting_broadcast = set()
 
-        await page.goto(f"https://twitter.com/{USERNAME}", timeout=60000)
-        await page.wait_for_timeout(5000)
+# media groups storage
+albums = defaultdict(list)
 
-        tweets = await page.locator("article").all()
-
-        if not tweets:
-            await browser.close()
-            return None
-
-        tweet = tweets[0]
-
-        text = await tweet.inner_text()
-
-        # tweet link
-        links = await tweet.locator("a").all()
-        tweet_url = None
-
-        for l in links:
-            href = await l.get_attribute("href")
-            if href and "/status/" in href:
-                tweet_url = "https://twitter.com" + href
-                break
-
-        # images
-        imgs = await tweet.locator("img").all()
-        images = []
-
-        for img in imgs:
-            src = await img.get_attribute("src")
-            if src and "profile_images" not in src:
-                images.append(src)
-
-        await browser.close()
-
-        if not tweet_url:
-            return None
-
-        if tweet_url == LAST_TWEET:
-            return None
-
-        LAST_TWEET = tweet_url
-
-        return {
-            "text": text,
-            "url": tweet_url,
-            "images": list(set(images))  # remove duplicates
-        }
+# processed albums
+processed_albums = set()
 
 
-async def send(tweet):
-    if not tweet:
+# =========================
+# START
+# =========================
+
+@dp.message(Command("start"))
+async def start(message: Message):
+    await message.reply(
+        "Broadcast Bot Online.\n\n"
+        "/broadcast - send broadcast\n"
+        "/cancel - cancel broadcast"
+    )
+
+
+# =========================
+# BROADCAST COMMAND
+# =========================
+
+@dp.message(Command("broadcast"))
+async def broadcast(message: Message):
+
+    if message.from_user.id != ADMIN_ID:
         return
 
-    caption = f"{tweet['text']}\n\n🔗 {tweet['url']}"
-    images = tweet["images"]
+    waiting_broadcast.add(message.from_user.id)
 
-    # no images
-    if not images:
-        await bot.send_message(CHAT_ID, caption)
+    await message.reply(
+        "Send the message/media/album to broadcast.\n\n"
+        "Use /cancel to stop."
+    )
+
+
+# =========================
+# CANCEL
+# =========================
+
+@dp.message(Command("cancel"))
+async def cancel(message: Message):
+
+    waiting_broadcast.discard(message.from_user.id)
+
+    await message.reply("Broadcast cancelled.")
+
+
+# =========================
+# HANDLE MEDIA GROUPS
+# =========================
+
+@dp.message(F.media_group_id)
+async def media_group_handler(message: Message):
+
+    user_id = message.from_user.id
+
+    if user_id not in waiting_broadcast:
         return
 
-    # single image
-    if len(images) == 1:
-        await bot.send_photo(CHAT_ID, images[0], caption=caption)
+    media_group_id = message.media_group_id
+
+    albums[media_group_id].append(message.message_id)
+
+    # wait for all album parts
+    await asyncio.sleep(2)
+
+    # already processed
+    if media_group_id in processed_albums:
         return
 
-    # album
-    media = []
-    for i, img in enumerate(images[:10]):
-        if i == 0:
-            media.append(InputMediaPhoto(media=img, caption=caption))
-        else:
-            media.append(InputMediaPhoto(media=img))
+    processed_albums.add(media_group_id)
 
-    await bot.send_media_group(CHAT_ID, media=media)
+    try:
+
+        message_ids = albums[media_group_id]
+
+        await bot.copy_messages(
+            chat_id=TARGET_CHAT_ID,
+            from_chat_id=message.chat.id,
+            message_ids=message_ids
+        )
+
+        await message.reply(
+            f"✅ Album broadcasted ({len(message_ids)} items)"
+        )
+
+    except Exception as e:
+        await message.reply(f"❌ Error:\n{e}")
+
+    finally:
+        waiting_broadcast.discard(user_id)
+
+        albums.pop(media_group_id, None)
 
 
-async def loop():
-    print("Bot started...")
-    await bot.send_message(CHAT_ID, "✅ Bot test successful")
-    while True:
-        try:
-            tweet = await fetch_latest_tweet()
-            await send(tweet)
+# =========================
+# HANDLE SINGLE MESSAGES
+# =========================
 
-        except Exception as e:
-            print("Error:", e)
+@dp.message()
+async def single_message_handler(message: Message):
 
-        await asyncio.sleep(60)
+    user_id = message.from_user.id
+
+    if user_id not in waiting_broadcast:
+        return
+
+    # ignore album parts
+    if message.media_group_id:
+        return
+
+    try:
+
+        await bot.copy_message(
+            chat_id=TARGET_CHAT_ID,
+            from_chat_id=message.chat.id,
+            message_id=message.message_id
+        )
+
+        await message.reply("✅ Broadcast sent.")
+
+    except Exception as e:
+        await message.reply(f"❌ Error:\n{e}")
+
+    finally:
+        waiting_broadcast.discard(user_id)
+
+
+# =========================
+# MAIN
+# =========================
+
+async def main():
+
+    print("Bot started")
+
+    me = await bot.get_me()
+
+    print(f"Logged in as @{me.username}")
+
+    await dp.start_polling(bot)
 
 
 if __name__ == "__main__":
-    asyncio.run(loop())
+    asyncio.run(main())
